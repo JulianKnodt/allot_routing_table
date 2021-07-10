@@ -6,68 +6,58 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 pub trait Route: Eq + Copy + std::fmt::Debug {
     const BITS: usize;
     fn addr(&self) -> [u8; (Self::BITS + 7) / 8];
-    fn prefix_len(&self) -> u8;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct RouteIpv4(Ipv4Addr, u8);
+pub struct RouteIpv4(pub Ipv4Addr);
 impl Route for RouteIpv4 {
     const BITS: usize = 32;
     #[inline]
     fn addr(&self) -> [u8; 4] {
         self.0.octets()
     }
-    #[inline]
-    fn prefix_len(&self) -> u8 {
-        self.1
-    }
 }
-impl RouteIpv4 {
-    pub fn new(ip: Ipv4Addr, prefix_len: u8) -> Self {
-        assert!(prefix_len <= 32);
-        Self(ip, prefix_len)
+impl From<Ipv4Addr> for RouteIpv4 {
+    fn from(ip: Ipv4Addr) -> Self {
+        Self(ip)
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct RouteIpv6(Ipv6Addr, u8);
+pub struct RouteIpv6(pub Ipv6Addr);
 impl Route for RouteIpv6 {
     const BITS: usize = 128;
     #[inline]
     fn addr(&self) -> [u8; 16] {
         self.0.octets()
     }
-    #[inline]
-    fn prefix_len(&self) -> u8 {
-        self.1
-    }
 }
 impl RouteIpv6 {
-    pub fn new(ip: Ipv6Addr, prefix_len: u8) -> Self {
-        assert!(prefix_len <= 128);
-        Self(ip, prefix_len)
+    pub fn new(ip: Ipv6Addr) -> Self {
+        Self(ip)
+    }
+}
+
+impl From<Ipv6Addr> for RouteIpv6 {
+    fn from(v: Ipv6Addr) -> Self {
+        Self(v)
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Route4Bit(u8, u8);
+pub struct Route4Bit(pub u8);
 impl Route for Route4Bit {
     const BITS: usize = 4;
     #[inline]
     fn addr(&self) -> [u8; 1] {
         [self.0]
     }
-    #[inline]
-    fn prefix_len(&self) -> u8 {
-        self.1
-    }
 }
 
-impl Route4Bit {
-    pub fn new(addr: u8, prefix_len: u8) -> Self {
-        assert!(addr < (1 << 4));
-        assert!(prefix_len <= 4);
-        Self(addr, prefix_len)
+impl From<u8> for Route4Bit {
+    fn from(v: u8) -> Self {
+        assert!(v < (1 << 4));
+        Self(v)
     }
 }
 
@@ -149,24 +139,29 @@ where
             routes: vec![None; entries],
         }
     }
-    fn insert(&mut self, bits: usize, r: R) -> bool {
+    fn insert(&mut self, r: impl Into<R>, prefix_len: usize) -> bool {
+        let r = r.into();
+        assert!(prefix_len <= R::BITS);
         insert_s(
             &mut self.routes,
-            bits,
-            get_bits(0, bits, &r.addr()) as usize,
-            r.prefix_len() as usize,
+            R::BITS,
+            get_bits(0, R::BITS, &r.addr()) as usize,
+            prefix_len,
             r,
         )
     }
-    fn search(&self, bits: usize, addr: &[u8]) -> Option<&R> {
-        (&self.routes[fringe_index(bits, get_bits(0, bits, addr) as usize)]).as_ref()
+    fn search(&self, r: impl Into<R>) -> Option<&R> {
+        let r = r.into();
+        (&self.routes[fringe_index(R::BITS, get_bits(0, R::BITS, &r.addr()) as usize)]).as_ref()
     }
-    fn remove(&mut self, bits: usize, r: R) -> Option<R> {
+    fn remove(&mut self, r: impl Into<R>, prefix_len: usize) -> Option<R> {
+        let r = r.into();
+        assert!(prefix_len <= R::BITS);
         remove_s(
             &mut self.routes,
-            bits,
-            get_bits(0, bits, &r.addr()) as usize,
-            r.prefix_len() as usize,
+            R::BITS,
+            get_bits(0, R::BITS, &r.addr()) as usize,
+            prefix_len,
         )
     }
 }
@@ -251,11 +246,22 @@ where
         } else {
             TableInner::Multi(MultiLevelTable::new(strides[0]))
         };
-        Self { strides, root, len: 0 }
+        Self {
+            strides,
+            root,
+            len: 0,
+        }
     }
-    pub fn len(&self) -> usize { self.len }
-    pub fn is_empty(&self) -> bool { self.len == 0 }
-    pub fn insert(&mut self, r: R) -> bool {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    pub fn insert(&mut self, r: impl Into<R>, prefix_len: usize) -> bool {
+        let r = r.into();
+        assert!(prefix_len <= R::BITS);
+
         let mut level = 0;
         let mut ss: usize = 0;
         let mut stride;
@@ -264,7 +270,7 @@ where
         let routes = curr.mut_routes();
 
         // degenerate case of empty route
-        if r.addr().iter().all(|&v| v == 0) && r.prefix_len() == 0 {
+        if r.addr().iter().all(|&v| v == 0) && prefix_len == 0 {
             if routes[1].is_some() {
                 return false;
             }
@@ -277,7 +283,7 @@ where
             let left_shift = R::BITS - ss;
             assert!(left_shift % 8 == 0);
             stride = get_bits(left_shift / 8, curr_stride, &r.addr()) as usize;
-            if r.prefix_len() as usize <= ss {
+            if prefix_len <= ss {
                 break;
             }
             let i = fringe_index(curr_stride, stride);
@@ -295,7 +301,7 @@ where
             TableInner::Leaf(s) => &mut s.routes,
             TableInner::Multi(m) => &mut m.routes,
         };
-        let did_insert = insert_s(routes, curr_stride, stride, r.prefix_len() as usize - ss, r);
+        let did_insert = insert_s(routes, curr_stride, stride, prefix_len - ss, r);
 
         if did_insert {
             //curr.refs += 1;
@@ -304,7 +310,10 @@ where
         }
         did_insert
     }
-    pub fn remove(&mut self, r: R) -> Option<R> {
+    pub fn remove(&mut self, r: impl Into<R>, prefix_len: usize) -> Option<R> {
+        let r = r.into();
+        assert!(prefix_len <= R::BITS);
+
         let mut level = 0;
         let mut parent_idxs = vec![];
         let mut ss = 0;
@@ -312,7 +321,7 @@ where
 
         let mut curr = &mut self.root;
         let routes = curr.mut_routes();
-        if r.addr().iter().all(|&v| v == 0) && r.prefix_len() == 0 {
+        if r.addr().iter().all(|&v| v == 0) && prefix_len == 0 {
             return routes[1].take();
         }
 
@@ -322,7 +331,7 @@ where
             let left_shift = R::BITS - ss;
             assert!(left_shift % 8 == 0);
             stride = get_bits(left_shift / 8, curr_stride, &r.addr()) as usize;
-            if r.prefix_len() as usize <= ss {
+            if prefix_len as usize <= ss {
                 break;
             }
             let i = fringe_index(curr_stride, stride);
@@ -338,13 +347,14 @@ where
             TableInner::Leaf(s) => &mut s.routes,
             TableInner::Multi(m) => &mut m.routes,
         };
-        let old = remove_s(routes, curr_stride, stride, r.prefix_len() as usize - ss)?;
+        let old = remove_s(routes, curr_stride, stride, prefix_len - ss)?;
         // TODO free stuff here
         self.len -= 1;
         Some(old)
     }
 
-    pub fn search(&self, r: R) -> Option<R> {
+    pub fn search(&self, r: impl Into<R>) -> Option<R> {
+        let r = r.into();
         let mut level = 0;
         let mut ss = 0;
         let mut stride;
@@ -395,76 +405,48 @@ impl Table<RouteIpv6> {
 #[test]
 fn test_single_level_simple() {
     let mut t = SingleLevelTable::<Route4Bit>::new(4);
-    assert!(t.insert(4, Route4Bit::new(12, 2)));
-    assert!(t.search(4, &[12]).is_some());
-    assert!(t.delete(4, Route4Bit::new(12, 2)).is_some());
-    assert!(t.search(4, &[12]).is_none());
+    assert!(t.insert(12, 2));
+    assert!(t.search(12).is_some());
+    assert!(t.remove(12, 2).is_some());
+    assert!(t.search(12).is_none());
 
-    assert!(t.insert(4, Route4Bit::new(0b1000, 1)));
-    assert!(t.search(4, &[0b1001]).is_some());
-    assert!(t.search(4, &[0b0001]).is_none());
-    assert!(t.search(4, &[0b1111]).is_some());
-    assert!(t.insert(4, Route4Bit::new(0b1111, 4)));
-    assert_eq!(t.search(4, &[0b1111]), Some(&Route4Bit::new(0b1111, 4)));
-    assert_eq!(t.search(4, &[0b1110]), Some(&Route4Bit::new(0b1000, 1)));
-    assert_eq!(t.search(4, &[0b1000]), Some(&Route4Bit::new(0b1000, 1)));
+    assert!(t.insert(0b1000, 1));
+    assert!(t.search(0b1001).is_some());
+    assert!(t.search(0b0001).is_none());
+    assert!(t.search(0b1111).is_some());
+    assert!(t.insert(0b1111, 4));
+    assert_eq!(t.search(0b1111), Some(&0b1111.into()));
+    assert_eq!(t.search(0b1110), Some(&0b1000.into()));
+    assert_eq!(t.search(0b1000), Some(&0b1000.into()));
 }
 
 #[test]
 fn test_multi_level_ipv4() {
     let mut t = Table::new_ipv4(vec![8; 4]);
-    assert!(t.insert(RouteIpv4::new(Ipv4Addr::new(127, 0, 0, 1), 12)));
+    assert!(t.insert(Ipv4Addr::new(127, 0, 0, 1), 12));
 
-    assert_ne!(
-        t.search(RouteIpv4::new(Ipv4Addr::new(127, 0, 0, 1), 12)),
-        None,
-    );
-    assert_ne!(
-        t.search(RouteIpv4::new(Ipv4Addr::new(127, 0, 0, 1), 16)),
-        None
-    );
-    assert_ne!(
-        t.search(RouteIpv4::new(Ipv4Addr::new(127, 0, 0, 1), 8)),
-        None
-    );
+    assert!(t.search(Ipv4Addr::new(127, 0, 0, 1)).is_some());
 
-    assert_eq!(
-        t.remove(RouteIpv4::new(Ipv4Addr::new(127, 0, 0, 1), 8)),
-        None
-    );
-    assert_ne!(
-        t.remove(RouteIpv4::new(Ipv4Addr::new(127, 0, 0, 1), 16)),
-        None
-    );
+    assert!(t.remove(Ipv4Addr::new(127, 0, 0, 1), 8).is_none());
+    assert!(t.remove(Ipv4Addr::new(127, 0, 0, 1), 16).is_some());
 }
 
 #[test]
 fn test_multi_level_ipv6() {
     let mut t = Table::new_ipv6(vec![8; 16]);
-    assert!(t.insert(RouteIpv6::new(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 12)));
+    assert!(t.insert(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 12));
 
-    assert_ne!(
-        t.search(RouteIpv6::new(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 12)),
-        None,
-    );
-    assert_ne!(
-        t.search(RouteIpv6::new(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 16)),
-        None
-    );
-    assert_ne!(
-        t.search(RouteIpv6::new(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 8)),
-        None
-    );
+    assert!(t.search(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0)).is_some());
+    assert!(t
+        .search(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0))
+        .is_some());
 
-    assert_eq!(
-        t.remove(RouteIpv6::new(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 8)),
-        None
-    );
-    assert_ne!(
-        t.remove(RouteIpv6::new(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 16)),
-        None
-    );
+    assert_eq!(t.remove(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 8), None);
+    assert!(t
+        .remove(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 16)
+        .is_some());
 }
+
 
 #[test]
 fn test_insert_ipv4_exhaustive() {
@@ -473,7 +455,7 @@ fn test_insert_ipv4_exhaustive() {
         // it's too expensive to test all ip addresses, but can test a lot
         for b in 0..=100u8 {
             let ip = Ipv4Addr::new(a, b, 0, 0);
-            assert!(t.insert(RouteIpv4::new(ip, 32)))
+            assert!(t.insert(ip, 32))
         }
     }
 }
