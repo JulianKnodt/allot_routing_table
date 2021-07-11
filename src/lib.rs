@@ -1,9 +1,10 @@
 #![feature(const_generics, const_evaluatable_checked)]
-#![allow(unused, incomplete_features)]
-use std::mem;
+#![allow(incomplete_features)]
+use std::fmt::Debug;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-pub trait Route: Eq + Copy + std::fmt::Debug {
+// A Route represents a series of bytes which has a fixed width.
+pub trait Route: Eq + Copy + Debug {
     const BITS: usize;
     fn addr(&self) -> [u8; (Self::BITS + 7) / 8];
 }
@@ -76,6 +77,67 @@ fn allot<R: Eq + Copy>(x: &mut [R], smallest_fringe_idx: usize, base_index: usiz
     allot(x, t, b, old, new);
     allot(x, t, b + 1, old, new);
 }
+/*
+*/
+
+/*
+// Non-recursive implementation is borken
+fn allot<R: Eq + Copy>(
+    x: &mut [R],
+    t: usize,
+    b: usize,
+    old: R,
+    new: R,
+) {
+    if b >= t {
+        if x[b] == old {
+            x[b] = new;
+        }
+        return;
+    }
+
+    start_change(x, b, t, b, old, new)
+}
+
+fn start_change<R: Eq + Copy>(x: &mut [R], mut j: usize, t: usize, b: usize, old: R, new: R) {
+    j <<= 1;
+    if j < t {
+        return non_fringe(x, j, t, b, old, new);
+    }
+    loop {
+      if x[b] == old {
+        x[b] = new;
+      }
+      if j & 1 == 1 {
+        return move_up(x, j, t, b, old, new);
+      }
+      j += 1;
+    }
+}
+
+fn non_fringe<R: Eq + Copy>(x: &mut [R], j: usize, t: usize, b: usize, old: R, new: R) {
+    if x[j] == old {
+        start_change(x, j, t, b, old, new);
+    } else {
+        move_on(x, j, t, b, old, new);
+    }
+}
+
+fn move_on<R: Eq + Copy>(x: &mut [R], j: usize, t: usize, b: usize, old: R, new: R) {
+    if j & 1 == 1 {
+        move_up(x, j, t, b, old, new);
+    } else {
+        non_fringe(x, j + 1, t, b, old, new)
+    }
+}
+fn move_up<R: Eq + Copy>(x: &mut [R], j: usize, t: usize, b: usize, old: R, new: R) {
+    let j = j >> 1;
+    x[j] = new;
+    if j != b {
+        move_on(x, j, t, b, old, new);
+    }
+}
+*/
 
 const fn base_index(w: usize, a: usize, l: usize) -> usize {
     (a >> (w - l)) | (1 << l)
@@ -83,11 +145,6 @@ const fn base_index(w: usize, a: usize, l: usize) -> usize {
 
 const fn fringe_index(width: usize, addr: usize) -> usize {
     base_index(width, addr, width)
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-struct SingleLevelTable<R> {
-    routes: Vec<Option<R>>,
 }
 
 fn insert_s<R: Route>(x: &mut [Option<R>], width: usize, addr: usize, prefix: usize, r: R) -> bool {
@@ -108,21 +165,26 @@ fn remove_s<R: Route>(x: &mut [Option<R>], width: usize, addr: usize, prefix: us
     Some(old)
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct SingleLevelTable<R> {
+    routes: Vec<Option<R>>,
+}
+
 // assumes that offset is divisible by 8.
 #[inline]
-fn get_bits(byte_offset: usize, bits: usize, mut src: &[u8]) -> u32 {
+fn get_bits(byte_offset: usize, bits: usize, src: &[u8]) -> u32 {
     if byte_offset > src.len() {
         return 0;
     }
 
-    let mask = ((1 << bits) - 1);
+    let mask = (1 << bits) - 1;
     let v = match &src[..src.len() - byte_offset] {
         &[] => return 0,
         &[d] => d as u32,
         &[c, d] => (((c as u32) << 8) + (d as u32)),
         &[b, c, d] => (((b as u32) << 16) + ((c as u32) << 8) + d as u32),
         &[.., a, b, c, d] => {
-            (((a as u32) << 24) + ((b as u32) << 16) + ((c as u32) << 8) + (d as u32))
+            ((a as u32) << 24) + ((b as u32) << 16) + ((c as u32) << 8) + (d as u32)
         }
     };
     v & mask
@@ -139,7 +201,7 @@ where
             routes: vec![None; entries],
         }
     }
-    fn insert(&mut self, r: impl Into<R>, prefix_len: usize) -> bool {
+    pub fn insert(&mut self, r: impl Into<R>, prefix_len: usize) -> bool {
         let r = r.into();
         assert!(prefix_len <= R::BITS);
         insert_s(
@@ -150,11 +212,11 @@ where
             r,
         )
     }
-    fn search(&self, r: impl Into<R>) -> Option<&R> {
+    pub fn search(&self, r: impl Into<R>) -> Option<&R> {
         let r = r.into();
         (&self.routes[fringe_index(R::BITS, get_bits(0, R::BITS, &r.addr()) as usize)]).as_ref()
     }
-    fn remove(&mut self, r: impl Into<R>, prefix_len: usize) -> Option<R> {
+    pub fn remove(&mut self, r: impl Into<R>, prefix_len: usize) -> Option<R> {
         let r = r.into();
         assert!(prefix_len <= R::BITS);
         remove_s(
@@ -262,10 +324,6 @@ where
         let r = r.into();
         assert!(prefix_len <= R::BITS);
 
-        let mut level = 0;
-        let mut ss: usize = 0;
-        let mut stride;
-
         let mut curr = &mut self.root;
         let routes = curr.mut_routes();
 
@@ -277,31 +335,30 @@ where
             routes[1] = Some(r);
             return true;
         }
-        loop {
+
+        let mut ss: usize = 0;
+        let mut level = 0;
+        let (stride, curr_stride) = loop {
             let curr_stride = self.strides[level];
             ss += curr_stride;
             let left_shift = R::BITS - ss;
-            assert!(left_shift % 8 == 0);
-            stride = get_bits(left_shift / 8, curr_stride, &r.addr()) as usize;
+            // assert!(left_shift % 8 == 0);
+            let stride = get_bits(left_shift / 8, curr_stride, &r.addr()) as usize;
             if prefix_len <= ss {
-                break;
+                break (stride, curr_stride);
             }
             let i = fringe_index(curr_stride, stride);
 
             let children = curr.mut_children().unwrap();
+            assert!(level + 1 < self.strides.len());
             let next_stride = self.strides[level + 1];
             let child = children[i]
                 .get_or_insert_with(|| TableInner::Multi(MultiLevelTable::new(next_stride)));
             curr = child;
             level += 1;
-        }
-        let curr_stride = self.strides[level];
-        ss -= curr_stride;
-        let routes = match curr {
-            TableInner::Leaf(s) => &mut s.routes,
-            TableInner::Multi(m) => &mut m.routes,
         };
-        let did_insert = insert_s(routes, curr_stride, stride, prefix_len - ss, r);
+        ss -= curr_stride;
+        let did_insert = insert_s(curr.mut_routes(), curr_stride, stride, prefix_len - ss, r);
 
         if did_insert {
             //curr.refs += 1;
@@ -343,11 +400,7 @@ where
 
         let curr_stride = self.strides[level];
         ss -= curr_stride;
-        let routes = match curr {
-            TableInner::Leaf(s) => &mut s.routes,
-            TableInner::Multi(m) => &mut m.routes,
-        };
-        let old = remove_s(routes, curr_stride, stride, prefix_len - ss)?;
+        let old = remove_s(curr.mut_routes(), curr_stride, stride, prefix_len - ss)?;
         // TODO free stuff here
         self.len -= 1;
         Some(old)
@@ -388,16 +441,16 @@ where
 }
 
 impl Table<RouteIpv4> {
-    fn new_ipv4(strides: Vec<usize>) -> Self {
+    pub fn new_ipv4(strides: Vec<usize>) -> Self {
         Self::new(strides)
     }
 }
 
 impl Table<RouteIpv6> {
-    fn new_ipv6(strides: Vec<usize>) -> Self {
+    pub fn new_ipv6(strides: Vec<usize>) -> Self {
         Self::new(strides)
     }
-    fn new_ipv6_default() -> Self {
+    pub fn new_ipv6_default() -> Self {
         Self::new(vec![8; 16])
     }
 }
@@ -437,16 +490,13 @@ fn test_multi_level_ipv6() {
     assert!(t.insert(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 12));
 
     assert!(t.search(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0)).is_some());
-    assert!(t
-        .search(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0))
-        .is_some());
+    assert!(t.search(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0)).is_some());
 
     assert_eq!(t.remove(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 8), None);
     assert!(t
         .remove(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 16)
         .is_some());
 }
-
 
 #[test]
 fn test_insert_ipv4_exhaustive() {
