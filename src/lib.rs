@@ -1,7 +1,12 @@
-#![feature(const_generics, const_evaluatable_checked)]
+#![feature(const_generics, const_evaluatable_checked, test)]
 #![allow(incomplete_features)]
 use std::fmt::Debug;
 use std::net::{Ipv4Addr, Ipv6Addr};
+
+#[cfg(test)]
+extern crate test;
+#[cfg(test)]
+use test::bench::Bencher;
 
 // A Route represents a series of bytes which has a fixed width.
 pub trait Route: Eq + Copy + Debug {
@@ -550,7 +555,6 @@ fn test_multi_level_ipv6() {
     assert!(t.insert(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 12));
 
     assert!(t.search(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0)).is_some());
-    assert!(t.search(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0)).is_some());
 
     assert_eq!(t.remove(Ipv6Addr::new(127, 0, 0, 1, 0, 0, 0, 0), 8), None);
     assert!(t
@@ -568,4 +572,22 @@ fn test_insert_ipv4_exhaustive() {
             assert!(t.insert(ip, 32))
         }
     }
+}
+
+#[bench]
+fn bench_insert_remove(b: &mut Bencher) {
+    let mut t = Table::new_ipv4(vec![8, 8, 8, 8]);
+    b.iter(|| {
+        assert!(t.insert(Ipv4Addr::new(127, 0, 0, 1), 12));
+        assert!(t.remove(Ipv4Addr::new(127, 0, 0, 1), 16).is_some());
+    });
+}
+
+#[bench]
+fn bench_search(b: &mut Bencher) {
+    let mut t = Table::new_ipv4(vec![8; 4]);
+    assert!(t.insert(Ipv4Addr::new(127, 0, 0, 1), 12));
+    b.iter(|| {
+        assert!(t.search(Ipv4Addr::new(127, 0, 0, 1)).is_some());
+    })
 }
