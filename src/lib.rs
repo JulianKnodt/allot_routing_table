@@ -33,11 +33,6 @@ impl Route for RouteIpv6 {
         self.0.octets()
     }
 }
-impl RouteIpv6 {
-    pub fn new(ip: Ipv6Addr) -> Self {
-        Self(ip)
-    }
-}
 
 impl From<Ipv6Addr> for RouteIpv6 {
     fn from(v: Ipv6Addr) -> Self {
@@ -139,15 +134,23 @@ fn move_up<R: Eq + Copy>(x: &mut [R], j: usize, t: usize, b: usize, old: R, new:
 }
 */
 
+#[inline]
 const fn base_index(w: usize, a: usize, l: usize) -> usize {
     (a >> (w - l)) | (1 << l)
 }
 
+#[inline]
 const fn fringe_index(width: usize, addr: usize) -> usize {
     base_index(width, addr, width)
 }
 
-fn insert_s<R: Route>(x: &mut [Option<R>], width: usize, addr: usize, prefix: usize, r: R) -> bool {
+fn insert_s<R: Eq + Copy>(
+    x: &mut [Option<R>],
+    width: usize,
+    addr: usize,
+    prefix: usize,
+    r: R,
+) -> bool {
     let b = base_index(width, addr, prefix);
     let curr = x[b];
     if curr == Some(r) {
@@ -157,7 +160,12 @@ fn insert_s<R: Route>(x: &mut [Option<R>], width: usize, addr: usize, prefix: us
     true
 }
 
-fn remove_s<R: Route>(x: &mut [Option<R>], width: usize, addr: usize, prefix: usize) -> Option<R> {
+fn remove_s<R: Eq + Copy>(
+    x: &mut [Option<R>],
+    width: usize,
+    addr: usize,
+    prefix: usize,
+) -> Option<R> {
     let b = base_index(width, addr, prefix);
     let old = x[b as usize]?;
     allot(x, 1 << width, b, Some(old), x[b as usize >> 1]);
@@ -166,7 +174,7 @@ fn remove_s<R: Route>(x: &mut [Option<R>], width: usize, addr: usize, prefix: us
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SingleLevelTable<R> {
-    routes: Vec<Option<R>>,
+    routes: Vec<Option<(R, usize)>>,
     len: usize,
 }
 
@@ -210,22 +218,23 @@ where
             R::BITS,
             get_bits(0, R::BITS, &r.addr()) as usize,
             prefix_len,
-            r,
+            (r, prefix_len),
         )
     }
-    pub fn search(&self, r: impl Into<R>) -> Option<&R> {
+    pub fn search(&self, r: impl Into<R>) -> Option<&(R, usize)> {
         let r = r.into();
         (&self.routes[fringe_index(R::BITS, get_bits(0, R::BITS, &r.addr()) as usize)]).as_ref()
     }
     pub fn remove(&mut self, r: impl Into<R>, prefix_len: usize) -> Option<R> {
         let r = r.into();
         assert!(prefix_len <= R::BITS);
-        remove_s(
-            &mut self.routes,
+        let old = remove_s(
+            &mut self.routes[..],
             R::BITS,
             get_bits(0, R::BITS, &r.addr()) as usize,
             prefix_len,
-        )
+        )?;
+        Some(old.0)
     }
 }
 
@@ -236,13 +245,13 @@ enum TableInner<R> {
 }
 
 impl<R> TableInner<R> {
-    fn mut_routes(&mut self) -> &mut [Option<R>] {
+    fn mut_routes(&mut self) -> &mut [Option<(R, usize)>] {
         match self {
             TableInner::Leaf(s) => &mut s.routes[..],
             TableInner::Multi(m) => &mut m.routes[..],
         }
     }
-    fn routes(&self) -> &[Option<R>] {
+    fn routes(&self) -> &[Option<(R, usize)>] {
         match self {
             TableInner::Leaf(s) => &s.routes[..],
             TableInner::Multi(m) => &m.routes[..],
@@ -284,7 +293,7 @@ impl<R> TableInner<R> {
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 struct MultiLevelTable<R> {
-    routes: Vec<Option<R>>,
+    routes: Vec<Option<(R, usize)>>,
     children: Vec<Option<TableInner<R>>>,
     len: usize,
 }
@@ -357,7 +366,7 @@ where
             if routes[1].is_some() {
                 return false;
             }
-            routes[1] = Some(r);
+            routes[1] = Some((r, prefix_len));
             return true;
         }
 
@@ -380,7 +389,7 @@ where
             let next_stride = self.strides[level + 1];
             let child = &mut children[i];
             if let Some(child) = child {
-              curr = child
+                curr = child
             } else {
                 *len += 1;
                 curr = child.insert(TableInner::Multi(MultiLevelTable::new(next_stride)));
@@ -388,7 +397,13 @@ where
             level += 1;
         };
         ss -= curr_stride;
-        let did_insert = insert_s(curr.mut_routes(), curr_stride, stride, prefix_len - ss, r);
+        let did_insert = insert_s(
+            curr.mut_routes(),
+            curr_stride,
+            stride,
+            prefix_len - ss,
+            (r, prefix_len),
+        );
 
         if did_insert {
             *curr.len_mut() += 1;
@@ -403,7 +418,7 @@ where
 
         let mut curr = &mut self.root;
         if r.addr().iter().all(|&v| v == 0) && prefix_len == 0 {
-            return curr.mut_routes().iter_mut().nth(1)?.take();
+            return Some(curr.mut_routes().iter_mut().nth(1)?.take()?.0);
         }
 
         let mut ss: usize = 0;
@@ -439,7 +454,7 @@ where
             *curr.len_mut() -= 1;
         }
         self.len -= 1;
-        Some(old)
+        Some(old.0)
     }
 
     fn mut_child_at_level(&mut self, level: usize) -> &mut TableInner<R> {
@@ -452,7 +467,7 @@ where
         curr
     }
 
-    pub fn search(&self, r: impl Into<R>) -> Option<R> {
+    pub fn search(&self, r: impl Into<R>) -> Option<(R, usize)> {
         let r = r.into();
 
         let mut curr = &self.root;
@@ -513,9 +528,9 @@ fn test_single_level_simple() {
     assert!(t.search(0b0001).is_none());
     assert!(t.search(0b1111).is_some());
     assert!(t.insert(0b1111, 4));
-    assert_eq!(t.search(0b1111), Some(&0b1111.into()));
-    assert_eq!(t.search(0b1110), Some(&0b1000.into()));
-    assert_eq!(t.search(0b1000), Some(&0b1000.into()));
+    assert_eq!(t.search(0b1111), Some(&(0b1111.into(), 4)));
+    assert_eq!(t.search(0b1110), Some(&(0b1000.into(), 1)));
+    assert_eq!(t.search(0b1000), Some(&(0b1000.into(), 1)));
 }
 
 #[test]
